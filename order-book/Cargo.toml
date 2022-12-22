@@ -1,0 +1,16 @@
+[package]
+name = "order-book"
+version = "0.1.0"
+edition = "2021"
+authors = ["Fanghao Yang"]
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ethers-contract = "1.0.2"
+ethers = { version = "1.0.2", features = ["eip712"] }
+ethers-derive-eip712 = "1.0.2"
+
+[dev-dependencies]
+hex = "0.4.3"

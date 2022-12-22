@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    'service',
+    'order-book',
+]
+[profile.release]
+panic = 'unwind'
