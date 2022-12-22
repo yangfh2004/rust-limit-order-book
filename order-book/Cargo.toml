@@ -11,6 +11,6 @@ license = "MIT"
 ethers-contract = "1.0.2"
 ethers = { version = "1.0.2", features = ["eip712"] }
 ethers-derive-eip712 = "1.0.2"
+hex = "0.4.3"
 
 [dev-dependencies]
-hex = "0.4.3"
