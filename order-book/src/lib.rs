@@ -5,7 +5,7 @@ use hex;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::ops::{Add, Div};
+use std::ops::Div;
 
 // local type alias
 type Address = H160;
@@ -38,7 +38,9 @@ pub struct JsonAccount {
 pub struct Account {
     username: String,
     ddx_balance: U256,
+    ddx_hold: U256,
     usd_balance: U256,
+    usd_hold: U256,
     trader_address: Address,
 }
 
@@ -47,15 +49,17 @@ impl Account {
         Self {
             username: user,
             ddx_balance: decimal_to_u256(&json.ddxBalance),
+            ddx_hold: U256::zero(),
             usd_balance: decimal_to_u256(&json.usdBalance),
+            usd_hold: U256::zero(),
             trader_address: json.traderAddress.clone(),
         }
     }
 
     pub fn to_json(&self) -> JsonAccount {
         JsonAccount {
-            ddxBalance: u256_to_decimal(&self.ddx_balance),
-            usdBalance: u256_to_decimal(&self.usd_balance),
+            ddxBalance: u256_to_decimal(&self.total_ddx()),
+            usdBalance: u256_to_decimal(&self.total_usd()),
             traderAddress: self.trader_address.clone(),
         }
     }
@@ -69,23 +73,25 @@ impl Account {
                     "Filled bid order contains mismatched data!"
                 );
                 self.ddx_balance += fill.fill_amount;
-                self.usd_balance -= fill
-                    .fill_amount
-                    .saturating_mul(fill.price)
-                    .div(unit_scale);
+                self.usd_hold -= fill.fill_amount.saturating_mul(fill.price).div(unit_scale);
             }
             Side::Ask => {
                 assert_eq!(
                     self.trader_address, fill.from,
                     "Filled ask order contains mismatched data!"
                 );
-                self.ddx_balance -= fill.fill_amount;
-                self.usd_balance += fill
-                    .fill_amount
-                    .saturating_mul(fill.price)
-                    .div(unit_scale);
+                self.ddx_hold -= fill.fill_amount;
+                self.usd_balance += fill.fill_amount.saturating_mul(fill.price).div(unit_scale);
             }
         }
+    }
+
+    pub fn total_ddx(&self) -> U256 {
+        self.ddx_balance+self.ddx_hold
+    }
+
+    pub fn total_usd(&self) -> U256 {
+        self.usd_balance+self.usd_hold
     }
 }
 
@@ -104,7 +110,9 @@ impl AccountManager {
         let account = Account {
             username: user.to_string(),
             ddx_balance: U256::zero(),
+            ddx_hold: U256::zero(),
             usd_balance: U256::zero(),
+            usd_hold: U256::zero(),
             trader_address: address,
         };
         self.accounts.insert(address, account);
@@ -112,7 +120,7 @@ impl AccountManager {
 
     pub fn add_json_account(&mut self, user: &str, json: JsonAccount) {
         let address = json.traderAddress.clone();
-        let mut account = Account::from_json(user.to_string(), json);
+        let account = Account::from_json(user.to_string(), json);
         self.accounts.insert(address, account);
     }
 
@@ -125,14 +133,47 @@ impl AccountManager {
         account.to_json()
     }
 
+    /// Generate a validate order from available account balance.
+    pub fn validate_order(&mut self, order: JsonOrder) -> Option<Order> {
+        if let Some(account) = self.accounts.get_mut(&order.traderAddress) {
+            let unit_scale = U256::from(1e18 as u64);
+            let encoded_order = order.encode_order();
+            match order.side {
+                Side::Bid => {
+                    let diff = encoded_order
+                        .amount
+                        .saturating_mul(encoded_order.price)
+                        .div(unit_scale);
+                    if diff <= account.usd_balance {
+                        account.usd_balance -= diff;
+                        account.usd_hold += diff;
+                    } else {
+                        return None;
+                    }
+                }
+                Side::Ask => {
+                    if encoded_order.amount <= account.ddx_balance {
+                        account.ddx_balance -= encoded_order.amount;
+                        account.ddx_hold += encoded_order.amount;
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            Some(encoded_order)
+        } else {
+            None
+        }
+    }
+
     pub fn update_accounts(&mut self, fill_result: FillResult) {
         for fill in fill_result.filled_orders {
             if self.accounts.contains_key(&fill.from) {
-                let mut account = self.accounts.get_mut(&fill.from).unwrap();
+                let account = self.accounts.get_mut(&fill.from).unwrap();
                 account.update(Side::Ask, &fill);
             }
             if self.accounts.contains_key(&fill.to) {
-                let mut account = self.accounts.get_mut(&fill.to).unwrap();
+                let account = self.accounts.get_mut(&fill.to).unwrap();
                 account.update(Side::Bid, &fill);
             }
         }
@@ -319,25 +360,23 @@ impl OrderBook {
         }
     }
 
-    fn create_new_limit_order(&mut self, order: JsonOrder) -> Hash {
-        let encoded_order = order.encode_order();
-        let order_id = encoded_order.hash_hex();
-        let book = match order.side {
+    fn create_new_limit_order(&mut self, side: Side, order: Order) -> Hash {
+        let order_id = order.hash_hex();
+        let book = match side {
             Side::Ask => &mut self.ask_book,
             Side::Bid => &mut self.bid_book,
         };
 
-        if let Some(val) = book.price_map.get(&encoded_order.price) {
-            book.price_levels[*val].push_back((order_id.clone(), encoded_order));
-            self.order_loc.insert(order_id.clone(), (order.side, *val));
+        if let Some(val) = book.price_map.get(&order.price) {
+            book.price_levels[*val].push_back((order_id.clone(), order));
+            self.order_loc.insert(order_id.clone(), (side, *val));
         } else {
             let new_loc = book.price_levels.len();
-            book.price_map.insert(encoded_order.price, new_loc);
+            book.price_map.insert(order.price, new_loc);
             let mut vec_deq = VecDeque::new();
-            vec_deq.push_back((order_id.clone(), encoded_order));
+            vec_deq.push_back((order_id.clone(), order));
             book.price_levels.push(vec_deq);
-            self.order_loc
-                .insert(order_id.clone(), (order.side, new_loc));
+            self.order_loc.insert(order_id.clone(), (side, new_loc));
         }
         order_id
     }
@@ -393,80 +432,87 @@ impl OrderBook {
         price_level.retain(|x| x.1.amount > U256::from(ERROR));
     }
 
-    pub fn add_limit_order(&mut self, order: JsonOrder) -> FillResult {
-        let encoded_order = order.encode_order();
-        let maker_order = encoded_order.hash_hex();
-        debug!(
-            "Got order with amount {}, at price {}",
-            order.amount, order.price
-        );
-        let mut fill_result = FillResult::new(encoded_order.amount, order.side.clone());
-        match order.side {
-            Side::Bid => {
-                let ask_book = &mut self.ask_book;
-                let price_map = &mut ask_book.price_map;
-                let price_levels = &mut ask_book.price_levels;
-                let mut price_map_iter = price_map.iter();
-
-                if let Some((mut x, _)) = price_map_iter.next() {
-                    while &encoded_order.price >= x {
-                        let curr_level = price_map[x];
-                        Self::match_at_price_level(
-                            &mut fill_result,
-                            &mut price_levels[curr_level],
-                            &mut self.order_loc,
-                            &maker_order,
-                            &order.traderAddress,
-                            Side::Bid,
-                        );
-                        if let Some((a, _)) = price_map_iter.next() {
-                            x = a;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            Side::Ask => {
-                let bid_book = &mut self.bid_book;
-                let price_map = &mut bid_book.price_map;
-                let price_levels = &mut bid_book.price_levels;
-                let mut price_map_iter = price_map.iter();
-
-                if let Some((mut x, _)) = price_map_iter.next_back() {
-                    while &encoded_order.price <= x {
-                        let curr_level = price_map[x];
-                        Self::match_at_price_level(
-                            &mut fill_result,
-                            &mut price_levels[curr_level],
-                            &mut self.order_loc,
-                            &maker_order,
-                            &order.traderAddress,
-                            Side::Ask,
-                        );
-                        if let Some((a, _)) = price_map_iter.next_back() {
-                            x = a;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if fill_result.remaining > U256::from(ERROR) {
-            let remaining_decimal = u256_to_decimal(&fill_result.remaining);
+    pub fn add_limit_order(
+        &mut self,
+        manager: &mut AccountManager,
+        order: JsonOrder,
+    ) -> Option<FillResult> {
+        if let Some(encoded_order) = manager.validate_order(order.clone()) {
+            let maker_order = encoded_order.hash_hex();
             debug!(
-                "Still remaining amount {} at price level {}",
-                remaining_decimal, order.price
+                "Got order with amount {}, at price {}",
+                order.amount, order.price
             );
-            fill_result.status = OrderStatus::PartiallyFilled;
-            let mut new_order = order.clone();
-            new_order.amount = remaining_decimal;
-            self.create_new_limit_order(new_order);
+            let mut fill_result = FillResult::new(encoded_order.amount, order.side.clone());
+            match order.side {
+                Side::Bid => {
+                    let ask_book = &mut self.ask_book;
+                    let price_map = &mut ask_book.price_map;
+                    let price_levels = &mut ask_book.price_levels;
+                    let mut price_map_iter = price_map.iter();
+
+                    if let Some((mut x, _)) = price_map_iter.next() {
+                        while &encoded_order.price >= x {
+                            let curr_level = price_map[x];
+                            Self::match_at_price_level(
+                                &mut fill_result,
+                                &mut price_levels[curr_level],
+                                &mut self.order_loc,
+                                &maker_order,
+                                &order.traderAddress,
+                                Side::Bid,
+                            );
+                            if let Some((a, _)) = price_map_iter.next() {
+                                x = a;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Side::Ask => {
+                    let bid_book = &mut self.bid_book;
+                    let price_map = &mut bid_book.price_map;
+                    let price_levels = &mut bid_book.price_levels;
+                    let mut price_map_iter = price_map.iter();
+
+                    if let Some((mut x, _)) = price_map_iter.next_back() {
+                        while &encoded_order.price <= x {
+                            let curr_level = price_map[x];
+                            Self::match_at_price_level(
+                                &mut fill_result,
+                                &mut price_levels[curr_level],
+                                &mut self.order_loc,
+                                &maker_order,
+                                &order.traderAddress,
+                                Side::Ask,
+                            );
+                            if let Some((a, _)) = price_map_iter.next_back() {
+                                x = a;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if fill_result.remaining > U256::from(ERROR) {
+                let remaining_decimal = u256_to_decimal(&fill_result.remaining);
+                debug!(
+                    "Still remaining amount {} at price level {}",
+                    remaining_decimal, order.price
+                );
+                fill_result.status = OrderStatus::PartiallyFilled;
+                let mut new_order = encoded_order.clone();
+                new_order.amount = fill_result.remaining;
+                self.create_new_limit_order(order.side, new_order);
+            } else {
+                fill_result.status = OrderStatus::Filled;
+            }
+            Some(fill_result)
         } else {
-            fill_result.status = OrderStatus::Filled;
+            None
         }
-        fill_result
     }
 
     pub fn generate_l2_order_book(&self) -> L2OrderBook {
@@ -485,10 +531,12 @@ impl OrderBook {
                     };
                     l2.asks.push(simple);
                     count -= 1;
-                    if count == 0 {
+                    if count <= 0 {
                         break;
                     }
                 }
+            } else {
+                break;
             }
         }
         let mut bid_price_map_iter = self.bid_book.price_map.iter();
@@ -505,10 +553,12 @@ impl OrderBook {
                     };
                     l2.bids.push(simple);
                     count -= 1;
-                    if count == 0 {
+                    if count <= 0 {
                         break;
                     }
                 }
+            } else {
+                break;
             }
         }
         l2
@@ -566,16 +616,15 @@ mod tests {
         );
     }
 
-    fn test_init(
+    fn account_init(
         alice_addr: &Address,
         alice_ddx: &str,
         alice_usd: &str,
         bob_addr: &Address,
         bob_ddx: &str,
         bob_usd: &str,
-    ) -> (AccountManager, OrderBook) {
+    ) -> AccountManager {
         let mut manager = AccountManager::new();
-        let mut order_book = OrderBook::new("DDX".to_string());
         let alice_json = JsonAccount {
             ddxBalance: alice_ddx.to_string(),
             usdBalance: alice_usd.to_string(),
@@ -588,7 +637,7 @@ mod tests {
             traderAddress: bob_addr.clone(),
         };
         manager.add_json_account("bob", bob_json);
-        (manager, order_book)
+        manager
     }
 
     fn address_init() -> (Address, Address) {
@@ -604,8 +653,8 @@ mod tests {
     #[test]
     fn order_book_case_1() {
         let (alice_address, bob_address) = address_init();
-        let (mut manager, mut order_book) =
-            test_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
         let alice_order = JsonOrder {
             amount: "1.0".to_string(),
             price: "10.0".to_string(),
@@ -613,7 +662,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(alice_order);
+        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -622,7 +671,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(bob_order);
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book is empty.
         assert_eq!(order_book.order_loc.len(), 0);
@@ -634,8 +683,8 @@ mod tests {
     #[test]
     fn order_book_test_2() {
         let (alice_address, bob_address) = address_init();
-        let (mut manager, mut order_book) =
-            test_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
             price: "10.0".to_string(),
@@ -643,7 +692,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(bob_order);
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let alice_order = JsonOrder {
             amount: "0.5".to_string(),
@@ -652,7 +701,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(alice_order);
+        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 1);
@@ -668,8 +717,8 @@ mod tests {
     #[test]
     fn order_book_test_3() {
         let (alice_address, bob_address) = address_init();
-        let (mut manager, mut order_book) =
-            test_init(&alice_address, "0.0", "10.0", &bob_address, "3.0", "10.0");
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "3.0", "10.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
         let alice_order = JsonOrder {
             amount: "1.0".to_string(),
             price: "10.0".to_string(),
@@ -677,7 +726,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(alice_order);
+        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -686,7 +735,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(bob_order);
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -695,7 +744,7 @@ mod tests {
             nonce: get_nonce(3),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(bob_order);
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "2.0".to_string(),
@@ -704,7 +753,7 @@ mod tests {
             nonce: get_nonce(4),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(bob_order);
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 3);
@@ -715,6 +764,60 @@ mod tests {
         let bob_json = manager.get_json_account(&bob_address);
         assert_eq!(bob_json.ddxBalance, "2.00");
         assert_eq!(bob_json.usdBalance, "20.00");
+    }
 
+    #[test]
+    fn invalidate_order() {
+        let (alice_address, bob_address) = address_init();
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
+        let alice_order = JsonOrder {
+            amount: "2.0".to_string(),
+            price: "10.0".to_string(),
+            side: Side::Bid,
+            nonce: get_nonce(1),
+            traderAddress: alice_address.clone(),
+        };
+        let fill_result = order_book.add_limit_order(&mut manager, alice_order);
+        assert!(fill_result.is_none(), "The trader makes bids more than its available liquidation");
+        let bob_order = JsonOrder {
+            amount: "2.0".to_string(),
+            price: "8.0".to_string(),
+            side: Side::Ask,
+            nonce: get_nonce(2),
+            traderAddress: bob_address.clone(),
+        };
+        let fill_result = order_book.add_limit_order(&mut manager, bob_order);
+        assert!(fill_result.is_none(), "The trader makes asks more than its available liquidation");
+    }
+
+    #[test]
+    fn generate_l2_book() {
+        let mut order_book = OrderBook::new("DDX".to_string());
+        let mut rng = rand::thread_rng();
+        let (alice_address, bob_address) = address_init();
+        let mut manager = account_init(&alice_address, "1000.0", "1000.0", &bob_address, "1000.0", "2000.0");
+        for _ in 0..100 {
+            let (alice_address, bob_address) = address_init();
+            let alice_order = JsonOrder {
+                amount: format!("{:.2}", rng.gen_range(0.0..10.0)),
+                price: format!("{:.2}", rng.gen_range(0.0..10.0)),
+                side: Side::Bid,
+                nonce: get_nonce(1),
+                traderAddress: alice_address.clone(),
+            };
+            order_book.add_limit_order(&mut manager, alice_order);
+            let bob_order = JsonOrder {
+                amount: format!("{:.2}", rng.gen_range(0.0..10.0)),
+                price: format!("{:.2}", rng.gen_range(10.0..20.0)),
+                side: Side::Ask,
+                nonce: get_nonce(2),
+                traderAddress: bob_address.clone(),
+            };
+            order_book.add_limit_order(&mut manager, bob_order);
+        }
+        let l2_book = order_book.generate_l2_order_book();
+        assert!(l2_book.asks.len() <= 50);
+        assert!(l2_book.bids.len() <= 50);
     }
 }
