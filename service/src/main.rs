@@ -1,14 +1,14 @@
-use actix_web::{get, post, put, delete, web, App, HttpRequest, HttpResponse, HttpServer, Responder, ResponseError};
+use actix_web::body::BoxBody;
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
-use actix_web::body::BoxBody;
+use actix_web::{delete, get, post, web, App, HttpResponse, HttpServer, Responder, ResponseError};
 
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 use std::fmt::Display;
 use std::sync::Mutex;
 // local module.
-use order_book::{Address, AccountManager, Hash, OrderBook, JsonOrder, JsonAccount};
+use order_book::{AccountManager, Address, Hash, JsonAccount, JsonOrder, OrderBook};
 
 struct AppState {
     // This shall be your database in the production env.
@@ -72,8 +72,7 @@ impl Display for ErrNoOrder {
 
 /// Create a new account. The username is generated internally.
 #[post("/accounts")]
-async fn new_account(req: web::Json<JsonAccount>, data: web::Data<AppState>) -> HttpResponse{
-
+async fn new_account(req: web::Json<JsonAccount>, data: web::Data<AppState>) -> HttpResponse {
     let mut manager = data.manager.lock().unwrap();
     let mut count = data.user_count.lock().unwrap();
     let account = JsonAccount {
@@ -94,8 +93,13 @@ async fn new_account(req: web::Json<JsonAccount>, data: web::Data<AppState>) -> 
 /// Get an account info with the corresponding trader address.
 #[get("/accounts/{traderAddress}")]
 #[allow(non_snake_case)]
-async fn get_account(traderAddress: web::Path<String>, data: web::Data<AppState>) -> Result<impl Responder, ErrNoAccount> {
-    let trader: Address = traderAddress.parse::<Address>().expect("Failed to parse trader's address!");
+async fn get_account(
+    traderAddress: web::Path<String>,
+    data: web::Data<AppState>,
+) -> Result<impl Responder, ErrNoAccount> {
+    let trader: Address = traderAddress
+        .parse::<Address>()
+        .expect("Failed to parse trader's address!");
     let manager = data.manager.lock().unwrap();
 
     if let Some(account) = manager.get_json_account(&trader) {
@@ -103,7 +107,7 @@ async fn get_account(traderAddress: web::Path<String>, data: web::Data<AppState>
     } else {
         let response = ErrNoAccount {
             address: traderAddress.clone(),
-            err: String::from("Account not found")
+            err: String::from("Account not found"),
         };
         Err(response)
     }
@@ -112,16 +116,23 @@ async fn get_account(traderAddress: web::Path<String>, data: web::Data<AppState>
 /// Delete an account with the corresponding trader address.
 #[delete("/accounts/{traderAddress}")]
 #[allow(non_snake_case)]
-async fn delete_account(traderAddress: web::Path<String>, data: web::Data<AppState>) -> Result<impl Responder, ErrNoAccount> {
-    let trader: Address = traderAddress.parse::<Address>().expect("Failed to parse trader's address!");
+async fn delete_account(
+    traderAddress: web::Path<String>,
+    data: web::Data<AppState>,
+) -> Result<impl Responder, ErrNoAccount> {
+    let trader: Address = traderAddress
+        .parse::<Address>()
+        .expect("Failed to parse trader's address!");
     let mut manager = data.manager.lock().unwrap();
+    let mut count = data.user_count.lock().unwrap();
 
     if let Some(account) = manager.delete_account(&trader) {
+        *count -= 1;
         Ok(web::Json(account))
     } else {
         let response = ErrNoAccount {
             address: traderAddress.clone(),
-            err: String::from("Account not found")
+            err: String::from("Account not found"),
         };
         Err(response)
     }
@@ -129,7 +140,10 @@ async fn delete_account(traderAddress: web::Path<String>, data: web::Data<AppSta
 
 /// Add an order to the order book (possibly matching other orders).
 #[post("/orders")]
-async fn new_order(req: web::Json<JsonOrder>, data: web::Data<AppState>) -> Result<impl Responder, ErrNoAccount> {
+async fn new_order(
+    req: web::Json<JsonOrder>,
+    data: web::Data<AppState>,
+) -> Result<impl Responder, ErrNoAccount> {
     let order = JsonOrder {
         amount: req.amount.clone(),
         nonce: req.nonce.clone(),
@@ -139,12 +153,12 @@ async fn new_order(req: web::Json<JsonOrder>, data: web::Data<AppState>) -> Resu
     };
     let mut manager = data.manager.lock().unwrap();
     let mut order_book = data.order_book.lock().unwrap();
-    if let Some(fill_result) = order_book.add_limit_order(&mut manager, order.clone()) {
+    if let Some(fill_result) = order_book.add_order(&mut manager, order.clone()) {
         Ok(web::Json(fill_result.generate_filled_orders()))
     } else {
         let response = ErrNoAccount {
             address: order.get_trader(),
-            err: String::from("Account not found or account balance is not enough!")
+            err: String::from("Account not found or account balance is not enough!"),
         };
         Err(response)
     }
@@ -152,7 +166,10 @@ async fn new_order(req: web::Json<JsonOrder>, data: web::Data<AppState>) -> Resu
 
 /// Get an order info with its EIP-712 hash.
 #[get("/orders/{hash}")]
-async fn get_order(hash: web::Path<Hash>, data: web::Data<AppState>) -> Result<impl Responder, ErrNoOrder> {
+async fn get_order(
+    hash: web::Path<Hash>,
+    data: web::Data<AppState>,
+) -> Result<impl Responder, ErrNoOrder> {
     let order_hash = hash.clone();
     let order_book = data.order_book.lock().unwrap();
     match order_book.get_order(order_hash.clone()) {
@@ -160,7 +177,7 @@ async fn get_order(hash: web::Path<Hash>, data: web::Data<AppState>) -> Result<i
         Err(_e) => {
             let response = ErrNoOrder {
                 hash: order_hash,
-                err: String::from("Account not found or account balance is not enough!")
+                err: String::from("Account not found or account balance is not enough!"),
             };
             Err(response)
         }
@@ -169,15 +186,19 @@ async fn get_order(hash: web::Path<Hash>, data: web::Data<AppState>) -> Result<i
 
 /// Cancel an order info with its EIP-712 hash.
 #[delete("/orders/{hash}")]
-async fn cancel_order(hash: web::Path<Hash>, data: web::Data<AppState>) -> Result<impl Responder, ErrNoOrder> {
+async fn cancel_order(
+    hash: web::Path<Hash>,
+    data: web::Data<AppState>,
+) -> Result<impl Responder, ErrNoOrder> {
     let order_hash = hash.clone();
     let mut order_book = data.order_book.lock().unwrap();
-    match order_book.cancel_order(order_hash.clone()) {
+    let mut manager = data.manager.lock().unwrap();
+    match order_book.cancel_order(&mut manager, order_hash.clone()) {
         Ok(order) => Ok(web::Json(order)),
         Err(_e) => {
             let response = ErrNoOrder {
                 hash: order_hash,
-                err: String::from("Account not found or account balance is not enough!")
+                err: String::from("Account not found or account balance is not enough!"),
             };
             Err(response)
         }
@@ -192,6 +213,26 @@ async fn get_book(data: web::Data<AppState>) -> impl Responder {
     web::Json(l2_book)
 }
 
-fn main() {
-    println!("Hello, world!");
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let app_state = web::Data::new(AppState {
+        manager: Mutex::new(AccountManager::new()),
+        order_book: Mutex::new(OrderBook::new("DDX".to_string())),
+        user_count: Mutex::new(0),
+    });
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(app_state.clone())
+            .service(new_account)
+            .service(get_account)
+            .service(delete_account)
+            .service(new_order)
+            .service(get_order)
+            .service(cancel_order)
+            .service(get_book)
+    })
+    .bind(("127.0.0.1", 4321))?
+    .run()
+    .await
 }

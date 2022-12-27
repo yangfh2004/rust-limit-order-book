@@ -16,7 +16,7 @@ type Decimal = String;
 const ORDER_BOOK_INIT_CAP: usize = 50_000;
 const MIN_PRICE: f64 = 1e-18;
 const L2_MAX: usize = 50;
-const ERROR: u8 = 100;
+const ERROR: u16 = 10000;
 
 fn u256_to_decimal(from: &U256) -> Decimal {
     let float = from.low_u128() as f64;
@@ -35,7 +35,7 @@ pub struct JsonAccount {
     pub traderAddress: Address,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Account {
     _username: String,
     ddx_balance: U256,
@@ -152,7 +152,7 @@ impl AccountManager {
                         .amount
                         .saturating_mul(encoded_order.price)
                         .div(unit_scale);
-                    if diff <= account.usd_balance {
+                    if diff <= U256::from(ERROR) + account.usd_balance {
                         account.usd_balance -= diff;
                         account.usd_hold += diff;
                     } else {
@@ -160,7 +160,7 @@ impl AccountManager {
                     }
                 }
                 Side::Ask => {
-                    if encoded_order.amount <= account.ddx_balance {
+                    if encoded_order.amount <= U256::from(ERROR) + account.ddx_balance {
                         account.ddx_balance -= encoded_order.amount;
                         account.ddx_hold += encoded_order.amount;
                     } else {
@@ -169,6 +169,32 @@ impl AccountManager {
                 }
             }
             Some(encoded_order)
+        } else {
+            None
+        }
+    }
+
+    /// Revert pending balance from canceled order and make it available to new orders.
+    pub fn release_pending_fund(&mut self, cancelled_order: &Order) -> Option<Account> {
+        if let Some(account) = self.accounts.get_mut(&cancelled_order.traderAddress){
+            let unit_scale = U256::from(1e18 as u64);
+            match cancelled_order.get_side() {
+                Side::Bid => {
+                    let diff = cancelled_order
+                        .amount
+                        .saturating_mul(cancelled_order.price)
+                        .div(unit_scale);
+                    assert!(diff <= U256::from(ERROR) + account.usd_hold, "User account pending USD balance mismatch!");
+                    account.usd_balance += diff;
+                    account.usd_hold -= diff;
+                },
+                Side::Ask => {
+                    assert!(cancelled_order.amount <= U256::from(ERROR) + account.ddx_hold, "User account pending DDX balance mismatch!");
+                    account.ddx_balance += cancelled_order.amount;
+                    account.ddx_hold -= cancelled_order.amount;
+                }
+            }
+            Some(account.clone())
         } else {
             None
         }
@@ -391,7 +417,7 @@ impl OrderBook {
         }
     }
 
-    pub fn cancel_order(&mut self, order_id: Hash) -> Result<JsonOrder, &str> {
+    pub fn cancel_order(&mut self, manager: &mut AccountManager, order_id: Hash) -> Result<JsonOrder, &str> {
         if let Some((side, price_level)) = self.order_loc.get(&order_id) {
             let current_map = match side {
                 Side::Bid => self.bid_book.price_levels.get_mut(*price_level).unwrap(),
@@ -399,6 +425,8 @@ impl OrderBook {
             };
             let order = current_map.remove(&order_id).unwrap();
             self.order_loc.remove(&order_id);
+            // restore user's account balance after cancellation.
+            manager.release_pending_fund(&order);
             Ok(order.to_json())
         } else {
             Err("No such order id")
@@ -477,7 +505,7 @@ impl OrderBook {
         price_level.retain(|_, o| o.amount > U256::from(ERROR));
     }
 
-    pub fn add_limit_order(
+    pub fn add_order(
         &mut self,
         manager: &mut AccountManager,
         order: JsonOrder,
@@ -677,7 +705,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        order_book.add_limit_order(&mut manager, alice_order.clone()).unwrap();
+        order_book.add_order(&mut manager, alice_order.clone()).unwrap();
         let hash_str = alice_order.encode_order().hash_hex();
         let order = order_book.get_order(hash_str);
         assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
@@ -695,9 +723,9 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        order_book.add_limit_order(&mut manager, alice_order.clone()).unwrap();
+        order_book.add_order(&mut manager, alice_order.clone()).unwrap();
         let hash_str = alice_order.encode_order().hash_hex();
-        let order = order_book.cancel_order(hash_str);
+        let order = order_book.cancel_order(&mut manager, hash_str);
         assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
     }
 
@@ -747,7 +775,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -756,7 +784,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book is empty.
         assert_eq!(order_book.order_loc.len(), 0);
@@ -777,7 +805,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let alice_order = JsonOrder {
             amount: "0.5".to_string(),
@@ -786,7 +814,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 1);
@@ -811,7 +839,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, alice_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, alice_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -820,7 +848,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "1.0".to_string(),
@@ -829,7 +857,7 @@ mod tests {
             nonce: get_nonce(3),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         let bob_order = JsonOrder {
             amount: "2.0".to_string(),
@@ -838,7 +866,7 @@ mod tests {
             nonce: get_nonce(4),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order).unwrap();
+        let fill_result = order_book.add_order(&mut manager, bob_order).unwrap();
         manager.update_accounts(fill_result);
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 3);
@@ -863,7 +891,7 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, alice_order);
+        let fill_result = order_book.add_order(&mut manager, alice_order);
         assert!(fill_result.is_none(), "The trader makes bids more than its available liquidation");
         let bob_order = JsonOrder {
             amount: "2.0".to_string(),
@@ -872,7 +900,7 @@ mod tests {
             nonce: get_nonce(2),
             traderAddress: bob_address.clone(),
         };
-        let fill_result = order_book.add_limit_order(&mut manager, bob_order);
+        let fill_result = order_book.add_order(&mut manager, bob_order);
         assert!(fill_result.is_none(), "The trader makes asks more than its available liquidation");
     }
 
@@ -891,7 +919,7 @@ mod tests {
                 nonce: get_nonce(1),
                 traderAddress: alice_address.clone(),
             };
-            order_book.add_limit_order(&mut manager, alice_order);
+            order_book.add_order(&mut manager, alice_order);
             let bob_order = JsonOrder {
                 amount: format!("{:.2}", rng.gen_range(0.0..10.0)),
                 price: format!("{:.2}", rng.gen_range(10.0..20.0)),
@@ -899,7 +927,7 @@ mod tests {
                 nonce: get_nonce(2),
                 traderAddress: bob_address.clone(),
             };
-            order_book.add_limit_order(&mut manager, bob_order);
+            order_book.add_order(&mut manager, bob_order);
         }
         let l2_book = order_book.generate_l2_order_book();
         assert!(l2_book.asks.len() <= 50);
