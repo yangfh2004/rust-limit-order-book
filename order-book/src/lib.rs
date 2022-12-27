@@ -4,12 +4,13 @@ use ethers_derive_eip712::*;
 use hex;
 use log::debug;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Div;
+use ethers::abi::AbiEncode;
 
 // local type alias
-type Address = H160;
-type Hash = String;
+pub type Address = H160;
+pub type Hash = String;
 type Decimal = String;
 // constants
 const ORDER_BOOK_INIT_CAP: usize = 50_000;
@@ -29,14 +30,14 @@ fn decimal_to_u256(from: &Decimal) -> U256 {
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct JsonAccount {
-    ddxBalance: Decimal,
-    usdBalance: Decimal,
-    traderAddress: Address,
+    pub ddxBalance: Decimal,
+    pub usdBalance: Decimal,
+    pub traderAddress: Address,
 }
 
 #[derive(Debug)]
 pub struct Account {
-    username: String,
+    _username: String,
     ddx_balance: U256,
     ddx_hold: U256,
     usd_balance: U256,
@@ -47,7 +48,7 @@ pub struct Account {
 impl Account {
     pub fn from_json(user: String, json: JsonAccount) -> Self {
         Self {
-            username: user,
+            _username: user,
             ddx_balance: decimal_to_u256(&json.ddxBalance),
             ddx_hold: U256::zero(),
             usd_balance: decimal_to_u256(&json.usdBalance),
@@ -108,7 +109,7 @@ impl AccountManager {
     }
     pub fn new_account(&mut self, user: &str, address: Address) {
         let account = Account {
-            username: user.to_string(),
+            _username: user.to_string(),
             ddx_balance: U256::zero(),
             ddx_hold: U256::zero(),
             usd_balance: U256::zero(),
@@ -124,13 +125,20 @@ impl AccountManager {
         self.accounts.insert(address, account);
     }
 
-    pub fn delete_account(&mut self, address: &Address) {
-        self.accounts.remove(address);
+    pub fn delete_account(&mut self, address: &Address) -> Option<JsonAccount> {
+        if let Some(account) = self.accounts.remove(address) {
+            Some(account.to_json())
+        } else {
+            None
+        }
     }
 
-    pub fn get_json_account(&self, address: &Address) -> JsonAccount {
-        let account = self.accounts.get(address).unwrap();
-        account.to_json()
+    pub fn get_json_account(&self, address: &Address) -> Option<JsonAccount> {
+        if let Some(account) = self.accounts.get(address) {
+            Some(account.to_json())
+        } else {
+            None
+        }
     }
 
     /// Generate a validate order from available account balance.
@@ -182,8 +190,8 @@ impl AccountManager {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Side {
-    Bid,
-    Ask,
+    Bid = 0,
+    Ask = 1,
 }
 
 #[derive(Debug)]
@@ -196,11 +204,11 @@ pub enum OrderStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct JsonOrder {
-    amount: Decimal,
-    nonce: Hash,
-    price: Decimal,
-    side: Side,
-    traderAddress: Address,
+    pub amount: Decimal,
+    pub nonce: Hash,
+    pub price: Decimal,
+    pub side: Side,
+    pub traderAddress: Address,
 }
 
 impl JsonOrder {
@@ -209,10 +217,7 @@ impl JsonOrder {
         let amount = decimal_to_u256(&self.amount);
         let price = decimal_to_u256(&self.price);
         let nonce = U256::from(hex::decode(self.nonce.clone()).unwrap().as_slice());
-        let side: u8 = match self.side {
-            Side::Bid => 0,
-            Side::Ask => 1,
-        };
+        let side: u8 = self.side.clone() as u8;
         Order {
             amount,
             nonce,
@@ -220,6 +225,10 @@ impl JsonOrder {
             side,
             traderAddress: self.traderAddress.clone(),
         }
+    }
+
+    pub fn get_trader(&self) -> String {
+        format!("0x{}", self.traderAddress.encode_hex())
     }
 }
 
@@ -236,6 +245,16 @@ pub struct Order {
 }
 
 impl Order {
+    pub fn to_json(&self) -> JsonOrder {
+        JsonOrder {
+            amount: u256_to_decimal(&self.amount),
+            nonce: format!("0x{}", &self.nonce.encode_hex()),
+            price: u256_to_decimal(&self.price),
+            side: self.get_side(),
+            traderAddress: self.traderAddress.clone(),
+        }
+    }
+
     pub fn hash_hex(&self) -> Hash {
         let hash_bytes = self.encode_eip712().unwrap();
         let mut prefix = "0x".to_string();
@@ -300,7 +319,7 @@ pub struct FillResult {
 }
 
 impl FillResult {
-    fn new(remaining: U256, side: Side) -> Self {
+    pub fn new(remaining: U256, side: Side) -> Self {
         FillResult {
             filled_orders: Vec::new(),
             remaining,
@@ -308,19 +327,32 @@ impl FillResult {
             side,
         }
     }
+    pub fn generate_filled_orders(&self) -> Vec<JsonFill> {
+        let mut filled_orders = Vec::new();
+        for fill in &self.filled_orders {
+            let json_fill = JsonFill {
+                maker_hash: fill.maker_hash.clone(),
+                taker_hash: fill.taker_hash.clone(),
+                fill_amount: u256_to_decimal(&fill.fill_amount),
+                price: u256_to_decimal(&fill.price),
+            };
+            filled_orders.push(json_fill);
+        }
+        filled_orders
+    }
 }
 
 #[derive(Debug)]
 struct HalfBook {
-    side: Side,
+    _side: Side,
     price_map: BTreeMap<U256, usize>,
-    price_levels: Vec<VecDeque<(Hash, Order)>>,
+    price_levels: Vec<HashMap<Hash, Order>>,
 }
 
 impl HalfBook {
     pub fn new(side: Side) -> Self {
         HalfBook {
-            side,
+            _side: side,
             price_map: BTreeMap::new(),
             price_levels: Vec::with_capacity(ORDER_BOOK_INIT_CAP),
         }
@@ -329,7 +361,7 @@ impl HalfBook {
 
 #[derive(Debug)]
 pub struct OrderBook {
-    symbol: String,
+    _symbol: String,
     bid_book: HalfBook,
     ask_book: HalfBook,
     // For fast cancels Order Hash -> (Side, Price_level)
@@ -339,22 +371,35 @@ pub struct OrderBook {
 impl OrderBook {
     pub fn new(symbol: String) -> Self {
         OrderBook {
-            symbol,
+            _symbol: symbol,
             bid_book: HalfBook::new(Side::Bid),
             ask_book: HalfBook::new(Side::Ask),
             order_loc: HashMap::with_capacity(ORDER_BOOK_INIT_CAP),
         }
     }
 
-    pub fn cancel_order(&mut self, order_id: Hash) -> Result<&str, &str> {
+    pub fn get_order(&self, order_id: Hash) -> Result<JsonOrder, &str> {
         if let Some((side, price_level)) = self.order_loc.get(&order_id) {
-            let current_deque = match side {
+            let current_map = match side {
+                Side::Bid => self.bid_book.price_levels.get(*price_level).unwrap(),
+                Side::Ask => self.ask_book.price_levels.get(*price_level).unwrap(),
+            };
+            let order = current_map.get(&order_id).unwrap();
+            Ok(order.to_json())
+        } else {
+            Err("No such order id")
+        }
+    }
+
+    pub fn cancel_order(&mut self, order_id: Hash) -> Result<JsonOrder, &str> {
+        if let Some((side, price_level)) = self.order_loc.get(&order_id) {
+            let current_map = match side {
                 Side::Bid => self.bid_book.price_levels.get_mut(*price_level).unwrap(),
                 Side::Ask => self.ask_book.price_levels.get_mut(*price_level).unwrap(),
             };
-            current_deque.retain(|x| x.0 != order_id);
+            let order = current_map.remove(&order_id).unwrap();
             self.order_loc.remove(&order_id);
-            Ok("Successfully cancelled order")
+            Ok(order.to_json())
         } else {
             Err("No such order id")
         }
@@ -368,14 +413,14 @@ impl OrderBook {
         };
 
         if let Some(val) = book.price_map.get(&order.price) {
-            book.price_levels[*val].push_back((order_id.clone(), order));
+            book.price_levels[*val].insert(order_id.clone(), order);
             self.order_loc.insert(order_id.clone(), (side, *val));
         } else {
             let new_loc = book.price_levels.len();
             book.price_map.insert(order.price, new_loc);
-            let mut vec_deq = VecDeque::new();
-            vec_deq.push_back((order_id.clone(), order));
-            book.price_levels.push(vec_deq);
+            let mut new_map = HashMap::new();
+            new_map.insert(order_id.clone(), order);
+            book.price_levels.push(new_map);
             self.order_loc.insert(order_id.clone(), (side, new_loc));
         }
         order_id
@@ -383,7 +428,7 @@ impl OrderBook {
 
     fn match_at_price_level(
         fill_result: &mut FillResult,
-        price_level: &mut VecDeque<(Hash, Order)>,
+        price_level: &mut HashMap<Hash, Order>,
         order_loc: &mut HashMap<Hash, (Side, usize)>,
         maker_order: &Hash,
         trader_addr: &Address,
@@ -429,7 +474,7 @@ impl OrderBook {
             }
         }
         // remove filled orders from the order book.
-        price_level.retain(|x| x.1.amount > U256::from(ERROR));
+        price_level.retain(|_, o| o.amount > U256::from(ERROR));
     }
 
     pub fn add_limit_order(
@@ -596,10 +641,9 @@ mod tests {
         hex::encode(nonce_bits.to_bytes_le())
     }
 
-    #[test]
-    fn json_order() {
-        let nonce_hex = get_nonce(9998);
-        let json_order = JsonOrder {
+    fn order_init(seed: u64) -> JsonOrder {
+        let nonce_hex = get_nonce(seed);
+        JsonOrder {
             amount: "1.0".to_string(),
             nonce: nonce_hex,
             price: "1.3".to_string(),
@@ -607,13 +651,54 @@ mod tests {
             traderAddress: "0x3A880652F47bFaa771908C07Dd8673A787dAEd3A"
                 .parse::<Address>()
                 .expect("Failed to parse trader's address!"),
-        };
+        }
+    }
+
+    #[test]
+    fn json_order() {
+        let json_order = order_init(9998);
         let order = json_order.encode_order();
         let hash_str = order.hash_hex();
         assert_eq!(
             "0x768858949ae9d5453e35736fa634f5d0f46d2ab00880551bc3533169239e022e",
             hash_str
         );
+    }
+
+    #[test]
+    fn get_order() {
+        let (alice_address, bob_address) = address_init();
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
+        let alice_order = JsonOrder {
+            amount: "1.0".to_string(),
+            price: "10.0".to_string(),
+            side: Side::Bid,
+            nonce: get_nonce(1),
+            traderAddress: alice_address.clone(),
+        };
+        order_book.add_limit_order(&mut manager, alice_order.clone()).unwrap();
+        let hash_str = alice_order.encode_order().hash_hex();
+        let order = order_book.get_order(hash_str);
+        assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
+    }
+
+    #[test]
+    fn cancel_order() {
+        let (alice_address, bob_address) = address_init();
+        let mut manager = account_init(&alice_address, "0.0", "10.0", &bob_address, "1.0", "0.0");
+        let mut order_book = OrderBook::new("DDX".to_string());
+        let alice_order = JsonOrder {
+            amount: "1.0".to_string(),
+            price: "10.0".to_string(),
+            side: Side::Bid,
+            nonce: get_nonce(1),
+            traderAddress: alice_address.clone(),
+        };
+        order_book.add_limit_order(&mut manager, alice_order.clone()).unwrap();
+        let hash_str = alice_order.encode_order().hash_hex();
+        let order = order_book.cancel_order(hash_str);
+        assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
     }
 
     fn account_init(
@@ -676,8 +761,8 @@ mod tests {
         // check if order book is empty.
         assert_eq!(order_book.order_loc.len(), 0);
         // check the balance of alice and bob.
-        assert_eq!(manager.get_json_account(&alice_address).ddxBalance, "1.00");
-        assert_eq!(manager.get_json_account(&bob_address).usdBalance, "10.00");
+        assert_eq!(manager.get_json_account(&alice_address).unwrap().ddxBalance, "1.00");
+        assert_eq!(manager.get_json_account(&bob_address).unwrap().usdBalance, "10.00");
     }
 
     #[test]
@@ -706,10 +791,10 @@ mod tests {
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 1);
         // check the balance of alice and bob.
-        let alice_json = manager.get_json_account(&alice_address);
+        let alice_json = manager.get_json_account(&alice_address).unwrap();
         assert_eq!(alice_json.ddxBalance, "0.50");
         assert_eq!(alice_json.usdBalance, "5.00");
-        let bob_json = manager.get_json_account(&bob_address);
+        let bob_json = manager.get_json_account(&bob_address).unwrap();
         assert_eq!(bob_json.ddxBalance, "0.50");
         assert_eq!(bob_json.usdBalance, "5.00");
     }
@@ -758,10 +843,10 @@ mod tests {
         // check if order book has a partially filled order.
         assert_eq!(order_book.order_loc.len(), 3);
         // check the balance of alice and bob.
-        let alice_json = manager.get_json_account(&alice_address);
+        let alice_json = manager.get_json_account(&alice_address).unwrap();
         assert_eq!(alice_json.ddxBalance, "1.00");
         assert_eq!(alice_json.usdBalance, "0.00");
-        let bob_json = manager.get_json_account(&bob_address);
+        let bob_json = manager.get_json_account(&bob_address).unwrap();
         assert_eq!(bob_json.ddxBalance, "2.00");
         assert_eq!(bob_json.usdBalance, "20.00");
     }
