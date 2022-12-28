@@ -154,7 +154,11 @@ async fn new_order(
     let mut manager = data.manager.lock().unwrap();
     let mut order_book = data.order_book.lock().unwrap();
     if let Some(fill_result) = order_book.add_order(&mut manager, order.clone()) {
-        Ok(web::Json(fill_result.generate_filled_orders()))
+        // generate json response.
+        let json_res = fill_result.generate_filled_orders();
+        // update accounts based the filled results.
+        manager.update_accounts(fill_result);
+        Ok(web::Json(json_res))
     } else {
         let response = ErrNoAccount {
             address: order.get_trader(),
@@ -177,7 +181,7 @@ async fn get_order(
         Err(_e) => {
             let response = ErrNoOrder {
                 hash: order_hash,
-                err: String::from("Account not found or account balance is not enough!"),
+                err: String::from("Order not found!"),
             };
             Err(response)
         }
@@ -198,7 +202,7 @@ async fn cancel_order(
         Err(_e) => {
             let response = ErrNoOrder {
                 hash: order_hash,
-                err: String::from("Account not found or account balance is not enough!"),
+                err: String::from("Order not found"),
             };
             Err(response)
         }

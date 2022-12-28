@@ -1,3 +1,4 @@
+use ethers::abi::AbiEncode;
 use ethers::types::{transaction::eip712::Eip712, H160, U256};
 use ethers_contract::EthAbiType;
 use ethers_derive_eip712::*;
@@ -5,9 +6,8 @@ use hex;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::ops::Div;
-use ethers::abi::AbiEncode;
-
 // local type alias
 pub type Address = H160;
 pub type Hash = String;
@@ -88,11 +88,11 @@ impl Account {
     }
 
     pub fn total_ddx(&self) -> U256 {
-        self.ddx_balance+self.ddx_hold
+        self.ddx_balance + self.ddx_hold
     }
 
     pub fn total_usd(&self) -> U256 {
-        self.usd_balance+self.usd_hold
+        self.usd_balance + self.usd_hold
     }
 }
 
@@ -176,7 +176,7 @@ impl AccountManager {
 
     /// Revert pending balance from canceled order and make it available to new orders.
     pub fn release_pending_fund(&mut self, cancelled_order: &Order) -> Option<Account> {
-        if let Some(account) = self.accounts.get_mut(&cancelled_order.traderAddress){
+        if let Some(account) = self.accounts.get_mut(&cancelled_order.traderAddress) {
             let unit_scale = U256::from(1e18 as u64);
             match cancelled_order.get_side() {
                 Side::Bid => {
@@ -184,12 +184,18 @@ impl AccountManager {
                         .amount
                         .saturating_mul(cancelled_order.price)
                         .div(unit_scale);
-                    assert!(diff <= U256::from(ERROR) + account.usd_hold, "User account pending USD balance mismatch!");
+                    assert!(
+                        diff <= U256::from(ERROR) + account.usd_hold,
+                        "User account pending USD balance mismatch!"
+                    );
                     account.usd_balance += diff;
                     account.usd_hold -= diff;
-                },
+                }
                 Side::Ask => {
-                    assert!(cancelled_order.amount <= U256::from(ERROR) + account.ddx_hold, "User account pending DDX balance mismatch!");
+                    assert!(
+                        cancelled_order.amount <= U256::from(ERROR) + account.ddx_hold,
+                        "User account pending DDX balance mismatch!"
+                    );
                     account.ddx_balance += cancelled_order.amount;
                     account.ddx_hold -= cancelled_order.amount;
                 }
@@ -237,12 +243,21 @@ pub struct JsonOrder {
     pub traderAddress: Address,
 }
 
+// Implement `Display` for `JsonOrder`.
+impl fmt::Display for JsonOrder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Use `self.number` to refer to each positional data point.
+        write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
+}
+
 impl JsonOrder {
     pub fn encode_order(&self) -> Order {
         // TODO: here may lose some precision
         let amount = decimal_to_u256(&self.amount);
         let price = decimal_to_u256(&self.price);
-        let nonce = U256::from(hex::decode(self.nonce.clone()).unwrap().as_slice());
+        let no_prefix = self.nonce.strip_prefix("0x").unwrap();
+        let nonce = U256::from(hex::decode(no_prefix).unwrap().as_slice());
         let side: u8 = self.side.clone() as u8;
         Order {
             amount,
@@ -417,7 +432,11 @@ impl OrderBook {
         }
     }
 
-    pub fn cancel_order(&mut self, manager: &mut AccountManager, order_id: Hash) -> Result<JsonOrder, &str> {
+    pub fn cancel_order(
+        &mut self,
+        manager: &mut AccountManager,
+        order_id: Hash,
+    ) -> Result<JsonOrder, &str> {
         if let Some((side, price_level)) = self.order_loc.get(&order_id) {
             let current_map = match side {
                 Side::Bid => self.bid_book.price_levels.get_mut(*price_level).unwrap(),
@@ -666,7 +685,7 @@ mod tests {
     fn get_nonce(seed: u64) -> String {
         let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
         let nonce_bits: BigUint = rng.sample(RandomBits::new(256));
-        hex::encode(nonce_bits.to_bytes_le())
+        format!("0x{}", hex::encode(nonce_bits.to_bytes_le()))
     }
 
     fn order_init(seed: u64) -> JsonOrder {
@@ -674,9 +693,9 @@ mod tests {
         JsonOrder {
             amount: "1.0".to_string(),
             nonce: nonce_hex,
-            price: "1.3".to_string(),
+            price: "10.0".to_string(),
             side: Side::Bid,
-            traderAddress: "0x3A880652F47bFaa771908C07Dd8673A787dAEd3A"
+            traderAddress: "0xb794f5ea0ba39494ce839613fffba74279579268"
                 .parse::<Address>()
                 .expect("Failed to parse trader's address!"),
         }
@@ -685,10 +704,11 @@ mod tests {
     #[test]
     fn json_order() {
         let json_order = order_init(9998);
+        debug!("{:}", json_order);
         let order = json_order.encode_order();
         let hash_str = order.hash_hex();
         assert_eq!(
-            "0x768858949ae9d5453e35736fa634f5d0f46d2ab00880551bc3533169239e022e",
+            "0x47f84837be59a0e7c6f9bc9af3c3e80971d8a589002dea75732137fe17ec3e1e",
             hash_str
         );
     }
@@ -705,7 +725,9 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        order_book.add_order(&mut manager, alice_order.clone()).unwrap();
+        order_book
+            .add_order(&mut manager, alice_order.clone())
+            .unwrap();
         let hash_str = alice_order.encode_order().hash_hex();
         let order = order_book.get_order(hash_str);
         assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
@@ -723,7 +745,9 @@ mod tests {
             nonce: get_nonce(1),
             traderAddress: alice_address.clone(),
         };
-        order_book.add_order(&mut manager, alice_order.clone()).unwrap();
+        order_book
+            .add_order(&mut manager, alice_order.clone())
+            .unwrap();
         let hash_str = alice_order.encode_order().hash_hex();
         let order = order_book.cancel_order(&mut manager, hash_str);
         assert!(order.is_ok(), "Cannot get order with EIP712 hash!");
@@ -789,8 +813,14 @@ mod tests {
         // check if order book is empty.
         assert_eq!(order_book.order_loc.len(), 0);
         // check the balance of alice and bob.
-        assert_eq!(manager.get_json_account(&alice_address).unwrap().ddxBalance, "1.00");
-        assert_eq!(manager.get_json_account(&bob_address).unwrap().usdBalance, "10.00");
+        assert_eq!(
+            manager.get_json_account(&alice_address).unwrap().ddxBalance,
+            "1.00"
+        );
+        assert_eq!(
+            manager.get_json_account(&bob_address).unwrap().usdBalance,
+            "10.00"
+        );
     }
 
     #[test]
@@ -892,7 +922,10 @@ mod tests {
             traderAddress: alice_address.clone(),
         };
         let fill_result = order_book.add_order(&mut manager, alice_order);
-        assert!(fill_result.is_none(), "The trader makes bids more than its available liquidation");
+        assert!(
+            fill_result.is_none(),
+            "The trader makes bids more than its available liquidation"
+        );
         let bob_order = JsonOrder {
             amount: "2.0".to_string(),
             price: "8.0".to_string(),
@@ -901,7 +934,10 @@ mod tests {
             traderAddress: bob_address.clone(),
         };
         let fill_result = order_book.add_order(&mut manager, bob_order);
-        assert!(fill_result.is_none(), "The trader makes asks more than its available liquidation");
+        assert!(
+            fill_result.is_none(),
+            "The trader makes asks more than its available liquidation"
+        );
     }
 
     #[test]
@@ -909,7 +945,14 @@ mod tests {
         let mut order_book = OrderBook::new("DDX".to_string());
         let mut rng = rand::thread_rng();
         let (alice_address, bob_address) = address_init();
-        let mut manager = account_init(&alice_address, "1000.0", "1000.0", &bob_address, "1000.0", "2000.0");
+        let mut manager = account_init(
+            &alice_address,
+            "1000.0",
+            "1000.0",
+            &bob_address,
+            "1000.0",
+            "2000.0",
+        );
         for _ in 0..100 {
             let (alice_address, bob_address) = address_init();
             let alice_order = JsonOrder {

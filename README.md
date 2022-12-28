@@ -168,12 +168,12 @@ Another feature that our matching engine should implement is "self-match prevent
 ### Testing REST API
 Use Curl with below commands to test the API if running on a localhost.
 
-To create a new account:
+To create a new account for Alice:
 ```shell
 curl -XPOST 127.0.0.1:4321/accounts -H "Content-Type: application/json" -d '{"ddxBalance":"0.0", "usdBalance":"10.0", "traderAddress": "0xb794f5ea0ba39494ce839613fffba74279579268"}'
 ```
 
-To get data from existing account:
+To get account balances from an existing account:
 ```shell
 curl -XGET -i 127.0.0.1:4321/accounts/0xb794f5ea0ba39494ce839613fffba74279579268
 ```
@@ -181,4 +181,57 @@ curl -XGET -i 127.0.0.1:4321/accounts/0xb794f5ea0ba39494ce839613fffba74279579268
 To delete an existing account:
 ```shell
 curl -XDELETE -i 127.0.0.1:4321/accounts/0xb794f5ea0ba39494ce839613fffba74279579268
+```
+
+To add a new order:
+```shell
+ curl -XPOST 127.0.0.1:4321/orders -H "Content-Type: application/json" -d '{"amount":"1.0","nonce":"0x2a760e6c569ef9d2e45dbed3bd162efdf65db6dc548542eb8ad78860b2d47b03","price":"10.0","side":"Bid","traderAddress":"0xb794f5ea0ba39494ce839613fffba74279579268"}'
+```
+
+To get an existing order:
+```shell
+curl -XGET -i 127.0.0.1:4321/orders/0x47f84837be59a0e7c6f9bc9af3c3e80971d8a589002dea75732137fe17ec3e1e
+```
+
+To cancel an existing order:
+```shell
+curl -XDELETE -i 127.0.0.1:4321/orders/0x47f84837be59a0e7c6f9bc9af3c3e80971d8a589002dea75732137fe17ec3e1e
+```
+
+To get current l2 order book:
+```shell
+curl -XGET -i 127.0.0.1:4321/book
+```
+
+#### Example
+Here is another example. After running above command to create Alice's account, create another account for Bob.
+```shell
+curl -XPOST 127.0.0.1:4321/accounts -H "Content-Type: application/json" -d '{"ddxBalance":"1.0", "usdBalance":"0.0", "traderAddress": "0x3A880652F47bFaa771908C07Dd8673A787dAEd3A"}' 
+```
+Then, Alice places a new order.
+```shell
+curl -XPOST 127.0.0.1:4321/orders -H "Content-Type: application/json" -d '{"amount": "1.0", "nonce": "0x0000000000000000000000000000000000000000000000000000000000000001", "price":"10.0", "side": "Bid", "traderAddress": "0xb794f5ea0ba39494ce839613fffba74279579268"}' 
+```
+Then, Bob places another order.
+```shell
+curl -XPOST 127.0.0.1:4321/orders -H "Content-Type: application/json" -d '{"amount": "1.0", "nonce": "0x0000000000000000000000000000000000000000000000000000000000000002", "price":"8.0", "side": "Ask", "traderAddress": "0x3A880652F47bFaa771908C07Dd8673A787dAEd3A"}' 
+```
+Bob's order is filled, you will expect to receive response a JSON object from the server:
+```json
+[{"maker_hash":"0x6bc83b9fa0c9097da046f8e6a0d5bca64b127da246ae45fc2f065ecf8d7f45cd",
+  "taker_hash":"0x4864826ba59a4a804c382acd1d7e72d1a42a6e2db96a783ed3b866317305f847",
+  "fill_amount":"1.00",
+  "price":"10.00"}]
+```
+Check Alice's account balances, so you will expect to get:
+```json
+{"ddxBalance":"1.00",
+  "usdBalance":"0.00",
+  "traderAddress":"0xb794f5ea0ba39494ce839613fffba74279579268"}
+```
+Check Bob's account balances, so you will expect to get:
+```json
+{"ddxBalance":"0.00",
+  "usdBalance":"10.00",
+  "traderAddress":"0x3a880652f47bfaa771908c07dd8673a787daed3a"}
 ```
