@@ -8,7 +8,10 @@ use serde::Serialize;
 use std::fmt::Display;
 use std::sync::Mutex;
 // local module.
-use order_book::{AccountManager, Address, Hash, JsonAccount, JsonOrder, OrderBook};
+use order_book::account::AccountManager;
+use order_book::json::{JsonAccount, JsonOrder};
+use order_book::primitive::{Address, Hash};
+use order_book::OrderBook;
 
 struct AppState {
     // This shall be your database in the production env.
